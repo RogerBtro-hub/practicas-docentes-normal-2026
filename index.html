@@ -57,4 +57,67 @@ const $ = id => document.getElementById(id);
  let auth, firestore, user, docRef, setDoc, getDoc, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail;
  let syncing=false, timer=null, busy=false, currentUID=null;
  const msg = t => {status.textContent=t;};
- const htmlEscape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','
+ const htmlEscape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function start(config){
+ msg('Conectando con Firebaseâ€¦');panel.innerHTML='';
+ try{
+ const [{initializeApp},{getAuth, onAuthStateChanged:watch,createUserWithEmailAndPassword:signup,signInWithEmailAndPassword:signin,signOut:logout,sendPasswordResetEmail:reset},{getFirestore,doc,getDoc:read,setDoc:write}]=await Promise.all([
+ import('https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js'),
+ import('https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js'),
+ import('https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js')]);
+ const app=initializeApp(config);auth=getAuth(app);firestore=getFirestore(app);
+ ({onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,sendPasswordResetEmail}={onAuthStateChanged:watch,createUserWithEmailAndPassword:signup,signInWithEmailAndPassword:signin,signOut:logout,sendPasswordResetEmail:reset});
+ getDoc=read;setDoc=write;docRef=uid=>doc(firestore,'usuarios',uid,'registros','semana');
+ onAuthStateChanged(auth,async u=>{
+   syncing=false;clearTimeout(timer);currentUID=u?.uid||null;user=u;
+   if(u){await chooseData(u)}else{loginUI()}
+ });
+ }catch(e){msg('No se pudo conectar: '+e.message);panel.innerHTML='<button id="retryConfig">Reintentar conexiÃ³n</button>';$('retryConfig').onclick=()=>start(FIREBASE_CONFIG)}
+}
+function loginUI(){
+ document.body.classList.remove('unlocked');document.querySelector('#cloudPanel h2').textContent='Bienvenido a tu prÃ¡ctica docente';
+ msg('Inicia sesiÃ³n para guardar y recuperar tus registros en distintos dispositivos. Mientras tanto, la aplicaciÃ³n sigue guardando localmente.');
+ panel.innerHTML=`<div class="grid"><div><label>Correo electrÃ³nico</label><input id="cloudEmail" type="email" autocomplete="email"></div><div><label>ContraseÃ±a</label><input id="cloudPass" type="password" autocomplete="current-password" minlength="6"></div></div><div class="actions" style="margin-top:12px"><button id="cloudLogin" class="primary">Iniciar sesiÃ³n</button><button id="cloudRegister">Crear cuenta</button><button id="cloudReset">Recuperar contraseÃ±a</button></div>`;
+ $('cloudLogin').onclick=()=>action(()=>signInWithEmailAndPassword(auth,$('cloudEmail').value.trim(),$('cloudPass').value));
+ $('cloudRegister').onclick=()=>action(()=>createUserWithEmailAndPassword(auth,$('cloudEmail').value.trim(),$('cloudPass').value));
+ $('cloudReset').onclick=()=>action(async()=>{await sendPasswordResetEmail(auth,$('cloudEmail').value.trim());alert('Si el correo estÃ¡ registrado, revisa tu bandeja de entrada para recuperar el acceso.')});
+ $('cloudConfig').onclick=()=>{if(confirm('Â¿Cambiar la configuraciÃ³n de Firebase en este navegador?')){localStorage.removeItem(CONFIG_KEY);location.reload()}};
+}
+async function action(fn){try{await fn()}catch(e){alert('Firebase: '+(e.code||e.message))}}
+function hasData(d){return Object.values(d.profile||{}).some(Boolean)||Object.values(d.answers||{}).some(Boolean)}
+async function chooseData(u){
+ msg('Revisando los registros de '+u.email+'â€¦');panel.innerHTML='';
+ try{
+ const snap=await getDoc(docRef(u.uid));if(currentUID!==u.uid)return;
+ const local={profile:db.profile||{},answers:db.answers||{}};
+ const remote=snap.exists()?snap.data():null;
+ if(remote && hasData(remote)){
+   // La nube es la fuente principal al entrar desde otro dispositivo.
+   // Conservar un respaldo automÃ¡tico de los datos locales distintos.
+   if(hasData(local) && JSON.stringify(local)!==JSON.stringify({profile:remote.profile||{},answers:remote.answers||{}})){
+     try { localStorage.setItem('normal-respaldo-local-previo-'+u.uid,JSON.stringify(local)); }catch(e){}
+   }
+   db={profile:remote.profile||{},answers:remote.answers||{}};
+   localStorage.setItem('normal-practicas-v1',JSON.stringify(db));
+   profile();render();activate();
+ }else if(hasData(local)){
+  msg('Tu cuenta no tiene registros en la nube todavÃ­a. Puedes subir los datos de este navegador.');
+  panel.innerHTML='<div class="actions"><button class="primary" id="startUpload">Guardar mis datos locales en la nube</button><button id="downloadFirst">Descargar respaldo antes</button></div>';
+  $('startUpload').onclick=async()=>{if(await uploadNow())activate()};$('downloadFirst').onclick=()=>document.getElementById('backup').click();
+ }else{activate()}
+ }catch(e){msg('Error al consultar la nube: '+(e.code||e.message));panel.innerHTML='<button id="retryCloud">Reintentar</button>';$('retryCloud').onclick=()=>chooseData(u)}
+}
+function activate(){document.body.classList.add('unlocked');syncing=true;accountUI();msg('Conectado. Tus cambios se guardan localmente y se envÃ­an a la nube.');}
+function accountUI(){document.querySelector('#cloudPanel h2').textContent='Mi cuenta y sincronizaciÃ³n';panel.innerHTML=`<p>Cuenta: <strong>${htmlEscape(user.email||'')}</strong></p><div class="actions"><button id="syncNow" class="primary">Guardar ahora en la nube</button><button id="logout">Cerrar sesiÃ³n</button></div><p class="muted">Usa la misma cuenta en el celular y la computadora. Antes de cambiar de dispositivo, espera a que aparezca Â«Guardado en la nubeÂ». Si editas a la vez en dos dispositivos, prevalecerÃ¡ el Ãºltimo guardado.</p>`;
+ $('syncNow').onclick=()=>uploadNow();
+ $('logout').onclick=async()=>{if(!confirm('Antes de cerrar sesiÃ³n, descarga un respaldo si tienes cambios sin sincronizar. Â¿Cerrar sesiÃ³n y limpiar los datos locales de este navegador?'))return;syncing=false;clearTimeout(timer);document.body.classList.remove('unlocked');await signOut(auth);db={profile:{},answers:{}};save();profile();render()};
+}
+async function uploadNow(){
+ if(!user||busy)return false;busy=true;const uid=user.uid;
+ try{msg('Guardando en la nubeâ€¦');await setDoc(docRef(uid),{profile:JSON.parse(JSON.stringify(db.profile)),answers:JSON.parse(JSON.stringify(db.answers)),updatedAt:new Date().toISOString()});if(currentUID===uid)msg('Guardado en la nube âœ“ Â· '+new Date().toLocaleTimeString('es-MX'));return true;}
+ catch(e){msg('No se pudo guardar en la nube: '+(e.code||e.message)+'. Tus cambios siguen en este navegador.');return false;}
+ finally{busy=false}
+}
+window.addEventListener('practicas:save',()=>{if(!syncing||!user)return;clearTimeout(timer);timer=setTimeout(uploadNow,1200)});
+ start(FIREBASE_CONFIG);
+</script></body></html>
